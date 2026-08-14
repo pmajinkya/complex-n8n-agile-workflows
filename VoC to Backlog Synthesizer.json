@@ -1,0 +1,396 @@
+{
+  "name": "AI VoC → Backlog Synthesizer",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 🧠 AI VoC → Backlog Synthesizer — Setup Checklist\n\n1. **Webhook node**: Copy the Production URL and point your feedback source (Typeform webhook, in-app form, support tool) at it.\n2. **OpenAI node**: Click the Credential dropdown and select or create your `OpenAi account` credential. Model defaults to gpt-4o-mini — swap if desired.\n3. **Slack nodes (x2)**: Click the Credential dropdown and select or create your `slackOAuth2Api` credential, then choose the target Channel ID in each node's Channel field.\n4. **Jira node**: Click the Credential dropdown and select or create your `jiraSoftwareCloudApi` credential, then pick your Project and Issue Type (e.g. Story/PBI) from the dropdowns.\n5. **Notify node**: After activating, manually replace `YOUR-DOMAIN` inside the Slack 'Notify: Backlog Item Created' node text expression with your real Atlassian domain so the ticket link resolves.\n\nNo credentials are pre-linked in this file — every node below shows as unconfigured until you assign your own.",
+        "height": 420,
+        "width": 380
+      },
+      "id": "n1-sticky-0000-4000-8000-000000000001",
+      "name": "Setup Instructions",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-360, -80]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voc-feedback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "n2-webhook-0000-4000-8000-000000000002",
+      "name": "Feedback Intake Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "voc-feedback-intake",
+      "notes": "CONFIGURE: This is the trigger. Copy the 'Production URL' shown on this node and configure your feedback source (Typeform, in-app widget, support desk webhook, etc.) to POST JSON here. Method is POST, path is /voc-feedback.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "customerName",
+              "type": "string",
+              "value": "={{ $json.body?.customerName || $json.body?.name || $json.body?.fields?.name || 'Anonymous' }}"
+            },
+            {
+              "id": "a2",
+              "name": "customerEmail",
+              "type": "string",
+              "value": "={{ $json.body?.customerEmail || $json.body?.email || $json.body?.fields?.email || 'unknown@customer.com' }}"
+            },
+            {
+              "id": "a3",
+              "name": "feedbackText",
+              "type": "string",
+              "value": "={{ $json.body?.feedbackText || $json.body?.message || $json.body?.fields?.feedback || JSON.stringify($json.body) }}"
+            },
+            {
+              "id": "a4",
+              "name": "source",
+              "type": "string",
+              "value": "={{ $json.body?.source || $json.headers?.['user-agent'] || 'Webhook' }}"
+            },
+            {
+              "id": "a5",
+              "name": "rating",
+              "type": "string",
+              "value": "={{ $json.body?.rating || 'N/A' }}"
+            },
+            {
+              "id": "a6",
+              "name": "submittedAt",
+              "type": "string",
+              "value": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n3-set-0000-4000-8000-000000000003",
+      "name": "Normalize Feedback Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 0],
+      "notes": "CONFIGURE: Adjust the expressions if your source's payload shape differs (e.g. Typeform sends nested 'form_response.answers'). This node standardizes fields for the rest of the workflow — it doesn't need credentials.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "message",
+        "modelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a Senior Product Analyst AI embedded in a product management pipeline. Analyze the raw customer feedback and return ONLY a strict JSON object — no markdown fences, no commentary, no extra text — with EXACTLY these keys:\n- sentiment: one of \"Positive\", \"Neutral\", \"Negative\"\n- urgency: one of \"Low\", \"Medium\", \"High\", \"Critical\"\n- isFeatureRequest: boolean\n- featureTitle: string, <=80 chars, empty string if not a feature request\n- featureSummary: string, 2-3 sentences describing the requested capability and the user benefit, empty string if not applicable\n- acceptanceCriteria: array of 3 short strings written in Given/When/Then style, empty array if not applicable\n- suggestedLabels: array of up to 4 lowercase kebab-case strings\n- category: one of \"UX\", \"Performance\", \"Integration\", \"Pricing\", \"Bug\", \"Other\"\n\nUrgency should be \"Critical\" for data loss, security, or total blockers; \"High\" for major workflow breakage or churn risk; \"Medium\" for meaningful friction; \"Low\" for cosmetic or nice-to-have items."
+            },
+            {
+              "role": "user",
+              "content": "=Customer: {{ $json.customerName }} ({{ $json.customerEmail }})\nSource: {{ $json.source }}\nRating: {{ $json.rating }}\n\nFeedback:\n{{ $json.feedbackText }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "n4-openai-0000-4000-8000-000000000004",
+      "name": "AI: Extract Sentiment & Urgency",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.3,
+      "position": [440, 0],
+      "notes": "CONFIGURE: This node has no credential linked. Click the Credential dropdown and select or create your OpenAI credential. Model defaults to gpt-4o-mini for cost efficiency; upgrade to gpt-4o for higher-accuracy triage if your feedback volume is low. Do not edit the system prompt unless you also update the Code node that parses its output.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $('Normalize Feedback Data').item.json;\nconst aiItem = $input.item.json;\n\nlet raw = aiItem.content || aiItem.text || (aiItem.message && aiItem.message.content) || (aiItem.choices && aiItem.choices[0] && aiItem.choices[0].message && aiItem.choices[0].message.content) || '';\n\nif (Array.isArray(raw)) {\n  raw = raw.map(function(p) { return p.text || ''; }).join('\\n');\n}\n\nlet parsed;\ntry {\n  const cleaned = String(raw).trim().replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch (err) {\n  parsed = {\n    sentiment: 'Neutral',\n    urgency: 'Low',\n    isFeatureRequest: false,\n    featureTitle: '',\n    featureSummary: '',\n    acceptanceCriteria: [],\n    suggestedLabels: ['ai-parse-error'],\n    category: 'Other',\n    parseError: err.message\n  };\n}\n\nreturn [{\n  json: Object.assign({}, original, parsed)\n}];"
+      },
+      "id": "n5-code-0000-4000-8000-000000000005",
+      "name": "Parse AI JSON Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "notes": "No configuration needed. Safely parses the AI's JSON response and re-merges it with the original customer fields. Falls back to a safe 'Low/Neutral' record if the model ever returns malformed JSON, so the workflow never crashes.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "or",
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.urgency }}",
+              "rightValue": "High",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.urgency }}",
+              "rightValue": "Critical",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n6-if-0000-4000-8000-000000000006",
+      "name": "Is High Urgency?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [880, 0],
+      "notes": "No configuration needed. Routes True (High/Critical urgency) to an immediate Slack alert; False continues silently to the feature-request check.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "text": "=🔥 *High-Urgency Feedback Received*\n*Urgency:* {{ $json.urgency }}  |  *Sentiment:* {{ $json.sentiment }}  |  *Category:* {{ $json.category }}\n*Customer:* {{ $json.customerName }} ({{ $json.customerEmail }})\n*Source:* {{ $json.source }}\n\n>{{ $json.feedbackText }}\n\n_This item is also being evaluated for automatic backlog creation._",
+        "otherOptions": {}
+      },
+      "id": "n7-slack-0000-4000-8000-000000000007",
+      "name": "Alert: High-Urgency Feedback",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [1100, -140],
+      "notes": "CONFIGURE: This node has no credential linked. Click the Credential dropdown and select or create your Slack credential, then pick the Channel ID where urgent VoC alerts should land (e.g. #product-urgent-review).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.isFeatureRequest }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n8-if-0000-4000-8000-000000000008",
+      "name": "Is Valid Feature Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1100, 120],
+      "notes": "No configuration needed. True → drafts a Jira backlog item. False → logs a no-action response (e.g. praise, bug report, or ambiguous feedback that should not auto-create a PBI).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "create",
+        "project": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "issueType": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "summary": "={{ $json.featureTitle || 'New Feature Request from Customer Feedback' }}",
+        "additionalFields": {
+          "description": "=h3. Feature Summary\n{{ $json.featureSummary }}\n\nh3. Acceptance Criteria\n{{ ($json.acceptanceCriteria || []).map(ac => '* ' + ac).join('\\n') }}\n\nh3. Voice of Customer Context\n* Sentiment: {{ $json.sentiment }}\n* Urgency: {{ $json.urgency }}\n* Category: {{ $json.category }}\n* Source: {{ $json.source }}\n* Submitted by: {{ $json.customerName }} ({{ $json.customerEmail }})\n\nh3. Original Feedback\n{quote}{{ $json.feedbackText }}{quote}\n\n_Auto-generated by the VoC → Backlog Synthesizer workflow. Please refine and prioritize before sprint planning._",
+          "labels": "={{ $json.suggestedLabels }}"
+        }
+      },
+      "id": "n9-jira-0000-4000-8000-000000000009",
+      "name": "Create Backlog PBI",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [1320, 220],
+      "notes": "CONFIGURE: This node has no credential linked. Click the Credential dropdown and select or create your Jira credential. In the Project field pick your target Product Backlog project. In Issue Type pick your PBI/Story issue type. Description and labels are auto-populated from the AI analysis in Jira wiki markup.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "text": "=✅ New backlog item drafted from customer feedback: *{{ $json.fields?.summary || $json.key }}*\n<https://YOUR-DOMAIN.atlassian.net/browse/{{ $json.key }}|{{ $json.key }}> — please review, refine, and size before adding to a sprint.",
+        "otherOptions": {}
+      },
+      "id": "n10-slack-0000-4000-8000-000000000010",
+      "name": "Notify: Backlog Item Created",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [1540, 220],
+      "notes": "CONFIGURE: This node has no credential linked. Click the Credential dropdown and select or create your Slack credential, then pick your product/backlog-grooming channel. IMPORTANT: replace 'YOUR-DOMAIN' in the text expression with your real Atlassian site domain so the ticket link works.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s1",
+              "name": "status",
+              "type": "string",
+              "value": "success"
+            },
+            {
+              "id": "s2",
+              "name": "message",
+              "type": "string",
+              "value": "=Feedback processed. Backlog item {{ $json.key }} created."
+            },
+            {
+              "id": "s3",
+              "name": "jiraKey",
+              "type": "string",
+              "value": "={{ $json.key }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n11-set-0000-4000-8000-000000000011",
+      "name": "Build Success Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1760, 220],
+      "notes": "No configuration needed. Formats the JSON returned to whoever called the webhook.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s1",
+              "name": "status",
+              "type": "string",
+              "value": "acknowledged"
+            },
+            {
+              "id": "s2",
+              "name": "message",
+              "type": "string",
+              "value": "Feedback received and logged. No backlog item was created (not identified as an actionable feature request)."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n12-set-0000-4000-8000-000000000012",
+      "name": "Build No-Action Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1320, 400],
+      "notes": "No configuration needed.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "n13-respond-0000-4000-8000-000000000013",
+      "name": "Respond to Sender",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1980, 220],
+      "notes": "No configuration needed. Returns a JSON acknowledgment to whatever system called the Feedback Intake Webhook.",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Feedback Intake Webhook": {
+      "main": [[{ "node": "Normalize Feedback Data", "type": "main", "index": 0 }]]
+    },
+    "Normalize Feedback Data": {
+      "main": [[{ "node": "AI: Extract Sentiment & Urgency", "type": "main", "index": 0 }]]
+    },
+    "AI: Extract Sentiment & Urgency": {
+      "main": [[{ "node": "Parse AI JSON Output", "type": "main", "index": 0 }]]
+    },
+    "Parse AI JSON Output": {
+      "main": [[{ "node": "Is High Urgency?", "type": "main", "index": 0 }]]
+    },
+    "Is High Urgency?": {
+      "main": [
+        [{ "node": "Alert: High-Urgency Feedback", "type": "main", "index": 0 }],
+        [{ "node": "Is Valid Feature Request?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert: High-Urgency Feedback": {
+      "main": [[{ "node": "Is Valid Feature Request?", "type": "main", "index": 0 }]]
+    },
+    "Is Valid Feature Request?": {
+      "main": [
+        [{ "node": "Create Backlog PBI", "type": "main", "index": 0 }],
+        [{ "node": "Build No-Action Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Backlog PBI": {
+      "main": [[{ "node": "Notify: Backlog Item Created", "type": "main", "index": 0 }]]
+    },
+    "Notify: Backlog Item Created": {
+      "main": [[{ "node": "Build Success Response", "type": "main", "index": 0 }]]
+    },
+    "Build Success Response": {
+      "main": [[{ "node": "Respond to Sender", "type": "main", "index": 0 }]]
+    },
+    "Build No-Action Response": {
+      "main": [[{ "node": "Respond to Sender", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "b7e1c2a0-1111-4aaa-9bbb-111111111111",
+  "meta": {
+    "instanceId": "voc-backlog-synthesizer-instance"
+  },
+  "id": "voc-backlog-synthesizer",
+  "tags": []
+}

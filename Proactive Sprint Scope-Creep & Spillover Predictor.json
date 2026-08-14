@@ -1,0 +1,298 @@
+{
+  "name": "Sprint Scope-Creep & Spillover Predictor",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 📉 Sprint Risk Predictor — Setup Checklist\n\n1. **Schedule Trigger**: Defaults to weekdays at 09:00 and 14:00. Edit the cron expression to match your team's cadence.\n2. **Configuration node**: Set `jiraDomain` (e.g. 'acme' for acme.atlassian.net) and `boardId` (find it in your Jira board URL) and adjust `inProgressThresholdHours` (default 48h).\n3. **HTTP Request nodes (x2)**: Select your `jiraSoftwareCloudApi` credential (or a Jira Basic Auth credential using an API token) on both.\n4. **Slack node**: Select your `slackOAuth2Api` credential and choose the Product Owner / Scrum Master channel.\n5. **Send Email node**: Select your SMTP credential and set From/To addresses.\n\nNo code changes required beyond these credential/field selections.",
+        "height": 440,
+        "width": 400
+      },
+      "id": "m1-sticky-0000-4000-8000-000000000001",
+      "name": "Setup Instructions",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-380, -100]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9,14 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "m2-trigger-0000-4000-8000-000000000002",
+      "name": "Mid-Sprint Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "notes": "CONFIGURE: Default cron runs twice daily on weekdays (9am & 2pm). Adjust the cron expression to fit your team's mid-sprint cadence.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "jiraDomain",
+              "type": "string",
+              "value": "your-domain"
+            },
+            {
+              "id": "c2",
+              "name": "boardId",
+              "type": "string",
+              "value": "123"
+            },
+            {
+              "id": "c3",
+              "name": "inProgressThresholdHours",
+              "type": "number",
+              "value": 48
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "m3-set-0000-4000-8000-000000000003",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 0],
+      "notes": "CONFIGURE (required): Set jiraDomain to your Atlassian subdomain, boardId to your Scrum board's numeric ID (visible in the board URL), and inProgressThresholdHours to your team's 'stuck ticket' threshold.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://{{ $json.jiraDomain }}.atlassian.net/rest/agile/1.0/board/{{ $json.boardId }}/sprint?state=active",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "options": {}
+      },
+      "id": "m4-http-0000-4000-8000-000000000004",
+      "name": "Get Active Sprint",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "notes": "CONFIGURE: Select your Jira Software Cloud credential. Retrieves the currently active sprint on the board configured above.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "sprintId",
+              "type": "string",
+              "value": "={{ $json.values[0].id }}"
+            },
+            {
+              "id": "e2",
+              "name": "sprintName",
+              "type": "string",
+              "value": "={{ $json.values[0].name }}"
+            },
+            {
+              "id": "e3",
+              "name": "sprintStartDate",
+              "type": "string",
+              "value": "={{ $json.values[0].startDate }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "m5-set-0000-4000-8000-000000000005",
+      "name": "Extract Sprint Details",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [660, 0],
+      "notes": "No configuration needed. Pulls the first active sprint's ID, name, and start date to compare against ticket timestamps downstream.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://{{ $('Configuration').item.json.jiraDomain }}.atlassian.net/rest/agile/1.0/sprint/{{ $json.sprintId }}/issue?expand=changelog&fields=summary,status,created,assignee,issuetype",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "options": {}
+      },
+      "id": "m6-http-0000-4000-8000-000000000006",
+      "name": "Get Sprint Issues + Changelog",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0],
+      "notes": "CONFIGURE: Select your Jira Software Cloud credential (same as the previous HTTP Request node). Fetches all issues in the active sprint with full status-change history.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $('Configuration').item.json;\nconst sprintInfo = $('Extract Sprint Details').item.json;\nconst response = $input.item.json;\nconst issues = response.issues || [];\n\nconst thresholdHours = Number(config.inProgressThresholdHours || 48);\nconst sprintStart = new Date(sprintInfo.sprintStartDate);\nconst now = new Date();\n\nconst flaggedIssues = [];\nlet scopeCreepCount = 0;\nlet stagnantCount = 0;\n\nfor (const issue of issues) {\n  const key = issue.key;\n  const summary = issue.fields.summary;\n  const assignee = issue.fields.assignee ? issue.fields.assignee.displayName : 'Unassigned';\n  const created = new Date(issue.fields.created);\n  const currentStatus = issue.fields.status ? issue.fields.status.name : 'Unknown';\n  const issueUrl = 'https://' + config.jiraDomain + '.atlassian.net/browse/' + key;\n\n  if (sprintStart && created > sprintStart) {\n    scopeCreepCount++;\n    flaggedIssues.push({\n      key: key,\n      summary: summary,\n      assignee: assignee,\n      url: issueUrl,\n      reason: 'Scope Creep',\n      detail: 'Added to the sprint on ' + created.toISOString().split('T')[0] + ', after sprint planning (sprint started ' + sprintStart.toISOString().split('T')[0] + ').'\n    });\n  }\n\n  if (currentStatus === 'In Progress' && issue.changelog && Array.isArray(issue.changelog.histories)) {\n    const histories = [...issue.changelog.histories].sort(function(a, b) { return new Date(a.created) - new Date(b.created); });\n    let lastTransitionToInProgress = null;\n\n    for (const history of histories) {\n      for (const item of history.items) {\n        if (item.field === 'status' && item.toString === 'In Progress') {\n          lastTransitionToInProgress = new Date(history.created);\n        }\n      }\n    }\n\n    if (lastTransitionToInProgress) {\n      const hoursInProgress = (now - lastTransitionToInProgress) / (1000 * 60 * 60);\n      if (hoursInProgress > thresholdHours) {\n        stagnantCount++;\n        flaggedIssues.push({\n          key: key,\n          summary: summary,\n          assignee: assignee,\n          url: issueUrl,\n          reason: 'Stuck In Progress',\n          detail: 'In \"In Progress\" for ' + Math.round(hoursInProgress) + ' hours (threshold: ' + thresholdHours + 'h). Last moved on ' + lastTransitionToInProgress.toISOString().split('T')[0] + '.'\n        });\n      }\n    }\n  }\n}\n\nreturn [{\n  json: {\n    sprintName: sprintInfo.sprintName,\n    sprintStartDate: sprintInfo.sprintStartDate,\n    totalIssues: issues.length,\n    flaggedCount: flaggedIssues.length,\n    scopeCreepCount: scopeCreepCount,\n    stagnantCount: stagnantCount,\n    flaggedIssues: flaggedIssues\n  }\n}];"
+      },
+      "id": "m7-code-0000-4000-8000-000000000007",
+      "name": "Analyze Scope Creep & Stagnation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0],
+      "notes": "No configuration needed. Flags two risk types: (1) tickets created/added after sprint start (scope creep) and (2) tickets that have sat 'In Progress' longer than the configured threshold, using Jira's changelog history.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.flaggedCount }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "m8-if-0000-4000-8000-000000000008",
+      "name": "Any Risks Detected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1320, 0],
+      "notes": "No configuration needed. True → sends the risk digest to Slack and Email. False → workflow ends quietly with no noise for a healthy sprint.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d1",
+              "name": "slackText",
+              "type": "string",
+              "value": "=🚨 *Sprint Risk Digest — {{ $json.sprintName }}*\nTotal issues: {{ $json.totalIssues }} | Scope creep: {{ $json.scopeCreepCount }} | Stuck in progress: {{ $json.stagnantCount }}\n\n{{ $json.flaggedIssues.map(i => '• *[' + i.reason + ']* <' + i.url + '|' + i.key + '> — ' + i.summary + ' (Assignee: ' + i.assignee + ')\\n   ' + i.detail).join('\\n\\n') }}"
+            },
+            {
+              "id": "d2",
+              "name": "emailHtml",
+              "type": "string",
+              "value": "=<h2>Sprint Risk Digest — {{ $json.sprintName }}</h2><p>Total issues: {{ $json.totalIssues }} | Scope creep: {{ $json.scopeCreepCount }} | Stuck in progress: {{ $json.stagnantCount }}</p><ul>{{ $json.flaggedIssues.map(i => '<li><strong>[' + i.reason + ']</strong> <a href=\"' + i.url + '\">' + i.key + '</a> — ' + i.summary + ' (Assignee: ' + i.assignee + ')<br/><em>' + i.detail + '</em></li>').join('') }}</ul><p>Review these with the team before end of sprint to protect the sprint goal.</p>"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "m9-set-0000-4000-8000-000000000009",
+      "name": "Format Digest Message",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1540, -140],
+      "notes": "No configuration needed. Pre-formats both a Slack-markdown version and an HTML version of the same digest for the two notification channels below.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "text": "={{ $json.slackText }}",
+        "otherOptions": {}
+      },
+      "id": "m10-slack-0000-4000-8000-000000000010",
+      "name": "Post Sprint Risk Digest",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [1760, -220],
+      "notes": "CONFIGURE: Select your Slack credential and choose the Channel ID for the Product Owner / Scrum Master (e.g. #sprint-health).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "fromEmail": "product-alerts@yourcompany.com",
+        "toEmail": "po-scrum-team@yourcompany.com",
+        "subject": "=Sprint Risk Digest – {{ $json.sprintName }} – Action Needed",
+        "html": "={{ $json.emailHtml }}",
+        "options": {}
+      },
+      "id": "m11-email-0000-4000-8000-000000000011",
+      "name": "Email Sprint Risk Digest",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1760, -60],
+      "notes": "CONFIGURE: Select your SMTP credential, then update fromEmail and toEmail to your Product Owner / Scrum Master addresses (comma-separate multiple recipients in toEmail).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "m12-noop-0000-4000-8000-000000000012",
+      "name": "No Risks Detected - Skip Notification",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1540, 140],
+      "notes": "No configuration needed. Sprint is healthy this run — no scope creep or stagnant tickets found, so no notification is sent.",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Mid-Sprint Schedule": {
+      "main": [[{ "node": "Configuration", "type": "main", "index": 0 }]]
+    },
+    "Configuration": {
+      "main": [[{ "node": "Get Active Sprint", "type": "main", "index": 0 }]]
+    },
+    "Get Active Sprint": {
+      "main": [[{ "node": "Extract Sprint Details", "type": "main", "index": 0 }]]
+    },
+    "Extract Sprint Details": {
+      "main": [[{ "node": "Get Sprint Issues + Changelog", "type": "main", "index": 0 }]]
+    },
+    "Get Sprint Issues + Changelog": {
+      "main": [[{ "node": "Analyze Scope Creep & Stagnation", "type": "main", "index": 0 }]]
+    },
+    "Analyze Scope Creep & Stagnation": {
+      "main": [[{ "node": "Any Risks Detected?", "type": "main", "index": 0 }]]
+    },
+    "Any Risks Detected?": {
+      "main": [
+        [{ "node": "Format Digest Message", "type": "main", "index": 0 }],
+        [{ "node": "No Risks Detected - Skip Notification", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format Digest Message": {
+      "main": [
+        [
+          { "node": "Post Sprint Risk Digest", "type": "main", "index": 0 },
+          { "node": "Email Sprint Risk Digest", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c8f2d3b1-2222-4bbb-9ccc-222222222222",
+  "meta": {
+    "instanceId": "sprint-risk-predictor-instance"
+  },
+  "id": "sprint-scope-creep-predictor",
+  "tags": []
+}
