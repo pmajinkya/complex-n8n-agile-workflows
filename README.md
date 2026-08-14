@@ -4,13 +4,13 @@ Two production-ready n8n automation workflows built for Product Owners, Scrum Ma
 
 ## Contents
 
-- [Prerequisites]
-- [Quick Start]
-- [Workflow 1: AI VoC → Backlog Synthesizer]
-- [Workflow 2: Sprint Scope-Creep & Spillover Predictor]
-- [Troubleshooting]
-- [Customization Notes]
-- [Security Notes]
+- Prerequisites
+- Quick Start
+- Workflow 1: AI VoC → Backlog Synthesizer
+- Workflow 2: Sprint Scope-Creep & Spillover Predictor
+- Troubleshooting
+- Customization Notes
+- Security Notes
 
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
